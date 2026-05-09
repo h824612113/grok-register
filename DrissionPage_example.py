@@ -1097,13 +1097,21 @@ def push_sso_to_api(new_tokens: list):
             get_resp = requests.get(endpoint, headers=headers, timeout=15, verify=False)
             if get_resp.status_code == 200:
                 data = get_resp.json()
-                # 兼容两种响应格式：
-                # 新版: {"tokens": {"ssoBasic": [...]}}
-                # 旧版: {"ssoBasic": [...]}
-                if isinstance(data, dict) and isinstance(data.get("tokens"), dict):
-                    existing = data["tokens"].get("ssoBasic", [])
+                # 兼容 grok2api 新旧响应格式：
+                # 新版列表: {"tokens": [{"token": "...", "pool": "basic"}]}
+                # 旧版分池: {"tokens": {"ssoBasic": [...]}} / {"ssoBasic": [...]}
+                if isinstance(data, dict) and isinstance(data.get("tokens"), list):
+                    existing = [
+                        item for item in data["tokens"]
+                        if isinstance(item, dict) and item.get("pool", "basic") in ("basic", "ssoBasic")
+                    ]
+                elif isinstance(data, dict) and isinstance(data.get("tokens"), dict):
+                    existing = data["tokens"].get("basic", []) or data["tokens"].get("ssoBasic", [])
                 else:
-                    existing = data.get("ssoBasic", []) if isinstance(data, dict) else []
+                    existing = (
+                        data.get("basic", []) or data.get("ssoBasic", [])
+                        if isinstance(data, dict) else []
+                    )
                 existing_tokens = [
                     item["token"] if isinstance(item, dict) else str(item)
                     for item in existing if item
@@ -1126,7 +1134,7 @@ def push_sso_to_api(new_tokens: list):
     try:
         resp = requests.post(
             endpoint,
-            json={"ssoBasic": tokens_to_push},
+            json={"basic": tokens_to_push},
             headers=headers,
             timeout=60,
             verify=False,
