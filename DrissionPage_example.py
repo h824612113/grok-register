@@ -10,7 +10,25 @@ import os
 import secrets
 import sys
 
-from email_register import get_email_and_token, get_oai_code
+# 邮箱模块选择：根据 config.json 的 email_mode 决定使用哪种
+# "cloudflare" -> cf_email_register (自有域名 + QQ邮箱IMAP)
+# "duckmail"   -> email_register (DuckMail临时邮箱)
+import json as _json_loader
+_email_mode = "cloudflare"
+try:
+    _cfg_path_ = os.path.join(os.path.dirname(__file__), "config.json")
+    if os.path.isfile(_cfg_path_):
+        with open(_cfg_path_, "r") as _f:
+            _email_mode = _json_loader.load(_f).get("email_mode", "duckmail")
+except Exception:
+    pass
+
+if _email_mode == "cloudflare":
+    from cf_email_register import get_email_and_token, get_oai_code
+    print("[*] 使用 Cloudflare 域名邮箱模式")
+else:
+    from email_register import get_email_and_token, get_oai_code
+    print("[*] 使用 DuckMail 临时邮箱模式")
 
 
 def setup_run_logger() -> logging.Logger:
@@ -188,6 +206,15 @@ def refresh_active_page():
     try:
         tabs = browser.get_tabs()
         if tabs:
+            # 优先找 x.ai 标签页，避免选到 chrome://new-tab-page/
+            for t in tabs:
+                try:
+                    if "x.ai" in t.url:
+                        page = t
+                        return page
+                except:
+                    pass
+            # 没有 x.ai 标签页，用最后一个
             page = tabs[-1]
         else:
             page = browser.new_tab()
@@ -197,14 +224,29 @@ def refresh_active_page():
 
 
 def open_signup_page():
-    # 每轮开始时打开注册页，并切到“使用邮箱注册”流程。
+    # 每轮开始时打开注册页，并切到"使用邮箱注册"流程。
     global page
-    refresh_active_page()
+    # 关闭旧标签，新开一个专门的标签
     try:
-        page.get(SIGNUP_URL)
+        old_tabs = browser.get_tabs()
+        for t in old_tabs[:-1]:
+            try:
+                t.close()
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        page = browser.new_tab(SIGNUP_URL)
+        time.sleep(8)
+        # 等页面稳定
+        try:
+            page.wait.load_start(timeout=20)
+        except Exception:
+            pass
+        time.sleep(3)
     except Exception:
         refresh_active_page()
-        page = browser.new_tab(SIGNUP_URL)
     click_email_signup_button()
 
 
@@ -229,11 +271,12 @@ return !!(givenInput && familyInput && passwordInput);
         return False
 
 
-def click_email_signup_button(timeout=10):
-    # 页面打开后，自动点击“使用邮箱注册”按钮。
+def click_email_signup_button(timeout=30):
+    # 页面打开后，自动点击"使用邮箱注册"按钮。
     deadline = time.time() + timeout
     while time.time() < deadline:
-        clicked = page.run_js(r"""
+        try:
+            clicked = page.run_js(r"""
 const candidates = Array.from(document.querySelectorAll('button, a, [role="button"]'));
 const target = candidates.find((node) => {
     const text = (node.innerText || node.textContent || '').replace(/\s+/g, '').toLowerCase();
@@ -247,16 +290,20 @@ if (!target) {
 target.click();
 return true;
         """)
+        except Exception:
+            time.sleep(1)
+            continue
 
         if clicked:
             return True
 
         time.sleep(0.5)
 
-    raise Exception('未找到“使用邮箱注册”按钮')
+    raise Exception('未找到"使用邮箱注册"按钮')
 
 
 def fill_email_and_submit(timeout=15):
+    global page, browser
     # 复用 `email_register.py` 里的邮箱获取逻辑，保留邮箱与 token 供后续验证码步骤继续使用。
     email, dev_token = get_email_and_token()
     if not email or not dev_token:
@@ -377,6 +424,47 @@ return true;
 
             if clicked:
                 print(f"[*] 已填写邮箱并点击注册: {email}")
+                # 等待页面跳转/出现 Turnstile
+                time.sleep(5)
+                # 处理邮箱提交后的 Turnstile 验证（如果有）
+                try:
+                    turnstile_state = page.run_js(
+                        """
+const challengeInput = document.querySelector('input[name="cf-turnstile-response"]');
+if (!challengeInput) { return 'not-found'; }
+const value = String(challengeInput.value || '').trim();
+return value ? 'ready' : 'pending';
+                        """
+                    )
+                    if turnstile_state == "pending":
+                        print("[*] 检测到邮箱提交后存在 Turnstile，尝试解决...")
+                        token = getTurnstileToken()
+                        if token:
+                            print("[*] Turnstile 已解决")
+                        else:
+                            print("[Warn] Turnstile 解决失败，继续等待验证码...")
+                except Exception as e:
+                    print(f"[Warn] Turnstile 处理异常（可忽略）: {e}")
+                
+                # 关键修复：确保页面仍在 x.ai 域名上
+                time.sleep(3)
+                try:
+                    current_url = page.url
+                    if "x.ai" not in current_url:
+                        print(f"[Warn] 页面已离开 x.ai: {current_url}")
+                        # 尝试找回正确的标签页
+                        for tab in browser.get_tabs():
+                            try:
+                                if "x.ai" in tab.url:
+                                    print(f"[*] 找到 x.ai 标签页: {tab.url}")
+                                    page = tab
+                                    break
+                            except:
+                                pass
+                except Exception as e:
+                    print(f"[Warn] 检查页面 URL 失败: {e}")
+                    refresh_active_page()
+                
                 return email, dev_token
 
         time.sleep(0.5)
@@ -386,13 +474,48 @@ return true;
 
 
 def fill_code_and_submit(email, dev_token, timeout=60):
+    global page, browser
     # 复用 `email_register.py` 里的验证码轮询逻辑，等待邮件到达后自动填写 OTP。
     code = get_oai_code(dev_token, email)
     if not code:
         raise Exception("获取验证码失败")
 
+    # 关键修复：获取验证码后，确保页面仍在 x.ai 上
+    try:
+        current_url = page.url
+        if "x.ai" not in current_url:
+            print(f"[Warn] 获取验证码后页面已离开 x.ai: {current_url}")
+            # 尝试找回正确的标签页
+            for tab in browser.get_tabs():
+                try:
+                    if "x.ai" in tab.url:
+                        print(f"[*] 找到 x.ai 标签页: {tab.url}")
+                        page = tab
+                        break
+                except:
+                    pass
+            # 如果还是找不到，刷新页面
+            if "x.ai" not in page.url:
+                print("[Warn] 未找到 x.ai 标签页，尝试刷新...")
+                refresh_active_page()
+    except Exception as e:
+        print(f"[Warn] 检查页面 URL 失败: {e}")
+        refresh_active_page()
+
     deadline = time.time() + timeout
     while time.time() < deadline:
+        # 每次循环都检查页面是否正确
+        try:
+            if "x.ai" not in page.url:
+                print(f"[Warn] 页面已离开 x.ai: {page.url}")
+                refresh_active_page()
+                time.sleep(1)
+                continue
+        except:
+            refresh_active_page()
+            time.sleep(1)
+            continue
+            
         try:
             filled = page.run_js(
                 """
@@ -1009,10 +1132,12 @@ return matches.slice(0, 30);
     raise Exception("登录后未提取到可见数字文本")
 
 
-def wait_for_sso_cookie(timeout=30):
+def wait_for_sso_cookie(timeout=90):
     # 必须在注册完成后再取 sso，优先抓取精确的 sso cookie。
+    # 同时兼容 cookie 名为 sso 或类似变体（如 _sso, sso_session 等）
     deadline = time.time() + timeout
     last_seen_names = set()
+    last_url = ""
 
     while time.time() < deadline:
         try:
@@ -1020,6 +1145,15 @@ def wait_for_sso_cookie(timeout=30):
             if page is None:
                 time.sleep(1)
                 continue
+
+            # 打印当前 URL 便于调试
+            try:
+                current_url = page.url
+                if current_url != last_url:
+                    print(f"[*] 当前页面: {current_url}")
+                    last_url = current_url
+            except Exception:
+                pass
 
             cookies = page.cookies(all_domains=True, all_info=True) or []
             for item in cookies:
@@ -1036,6 +1170,25 @@ def wait_for_sso_cookie(timeout=30):
                 if name == "sso" and value:
                     print("[*] 注册完成后已获取到 sso cookie。")
                     return value
+
+            # 检查是否有类似 sso 的 cookie（放宽匹配）
+            for item in cookies:
+                if isinstance(item, dict):
+                    name = str(item.get("name", "")).strip()
+                    value = str(item.get("value", "")).strip()
+                else:
+                    name = str(getattr(item, "name", "")).strip()
+                    value = str(getattr(item, "value", "")).strip()
+
+                if name and ("sso" in name.lower() or "token" in name.lower() or "session" in name.lower()) and value:
+                    print(f"[*] 找到类似 sso 的 cookie: {name} = {value[:40]}...")
+                    return value
+
+            # 检查 URL 是否已跳转到聊天界面（chat.grok.com 或 x.ai/chat）
+            if "chat" in last_url.lower() or "grok" in last_url.lower():
+                # 已到达聊天界面，再次检查 cookie
+                elapsed = int(time.time() - deadline + timeout)
+                print(f"[*] 已到达聊天界面，等待 cookie 设置中... ({elapsed}s)")
 
         except PageDisconnectedError:
             refresh_active_page()
