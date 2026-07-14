@@ -59,6 +59,9 @@ cp config.example.json config.json
         "endpoint": "",
         "token": "",
         "append": true
+    },
+    "cliproxy": {
+        "management_key": ""
     }
 }
 ```
@@ -75,6 +78,7 @@ cp config.example.json config.json
 | `api.endpoint` | string | grok2api 管理接口地址，留空跳过推送 |
 | `api.token` | string | grok2api 的 `app_key` |
 | `api.append` | bool | `true` 合并线上已有 token，`false` 覆盖 |
+| `cliproxy.management_key` | string | cliproxy Management API key；批量脚本会用它把本次 SSO 转为 `type: xai` 文件并上传 |
 
 ---
 
@@ -89,6 +93,20 @@ cp config.example.json config.json
 ---
 
 ## 启动方式
+
+批量注册并在结束后自动同步到 grok2api，同时把本次 SSO 通过 SSO-Bridge 转为 `type: xai` 文件并上传到 cliproxy（以下示例注册 10 个账号，并复用现有虚拟环境）：
+
+```bash
+cd /Users/hanhao/Documents/freecodex/grok-register && ./scripts/batch_register_and_push.sh --count 10 --no-rebuild-venv
+```
+
+首次运行或需要重建虚拟环境时，去掉 `--no-rebuild-venv`。
+
+如需临时跳过 cliproxy 上传：
+
+```bash
+./scripts/batch_register_and_push.sh --count 10 --skip-cliproxy
+```
 
 ```bash
 # 按 config.json 中 run.count 执行（默认 10 轮）

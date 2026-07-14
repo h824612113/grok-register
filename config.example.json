@@ -10,5 +10,8 @@
         "endpoint": "",
         "token": "",
         "append": true
+    },
+    "cliproxy": {
+        "management_key": ""
     }
 }
